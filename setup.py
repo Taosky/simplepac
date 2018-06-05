@@ -8,6 +8,9 @@ setup(name='simplepac',
       author_email='t@firefoxcn.net',
       license='MIT',
       packages=['simplepac'],
+      package_data={
+          'simplepac': ['resources/*']
+      },
       entry_points={
           'console_scripts': ['simplepac=simplepac.core:run'],
       },
