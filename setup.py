@@ -16,5 +16,9 @@ setup(name='simplepac',
       },
       install_requires=[
           'requests',
+          'matplotlib',
+          'numpy',
+          'sklearn',
+          'scipy ',
       ],
       zip_safe=False)

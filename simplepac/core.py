@@ -1,5 +1,6 @@
-from datetime import datetime
 from urllib.parse import urlparse
+from .easylist import get_pac_str
+from datetime import datetime
 from . import utils
 import requests
 import argparse
@@ -17,11 +18,15 @@ def parse():
     parser.add_argument('-o', '--output', dest='output', required=True,
                         help='output pac file')
     parser.add_argument('--proxy-rule', dest='proxy_rule',
-                        help='proxy rule, Base64 or text, default use gfwlist')
+                        help='[optional]proxy rule, Base64 or text, default use gfwlist')
     parser.add_argument('--user-rule', dest='user_rule',
-                        help='user rule like proxy rule, support cidr like "IP-CIDR,91.108.4.0/22"')
+                        help='[optional]user rule like proxy rule, support cidr like "IP-CIDR,91.108.4.0/22"')
 
-    parser.add_argument('--ad-rule', dest='ad_rule', help='ad rule to block ads')
+    parser.add_argument('--ad-block', dest='ad_block', help='[optional]enable ad block, use easylist.', action='store_true')
+
+    parser.add_argument('--black-hole', dest='black_hole',
+                        help='[optional]ad proxy, usually use a unreachable proxy, IOS may need to set nginx server,'
+                             'default:"PROXY 127.0.0.1:12306"')
 
     return parser.parse_args()
 
@@ -100,21 +105,47 @@ def generate(proxy, host_json, cidr_json, path):
         print(e)
 
 
-def main(rule_url, proxy, pac_path, user_rule_path):
-    print('getting rule from {}'.format(rule_url))
+def easylist_generate(proxy, host_json, cidr_json, easylist_str, black_hole, path):
+    if not black_hole:
+        black_hole = 'PROXY 127.0.0.1:12306'
+
+    update_time = datetime.now().strftime('%Y %m-%d %H:%M')
+
+    pac_content = pkgutil.get_data(__package__, 'resources/proxy_easylist.pac').decode('utf-8')
+    pac_content = pac_content.replace('__PROXY__', proxy)
+    pac_content = pac_content.replace('__UPDATE__', update_time)
+    pac_content = pac_content.replace('__CIDRS__', cidr_json)
+    pac_content = pac_content.replace('__DOMAINS__', host_json)
+    pac_content = pac_content.replace('__BLACKHOLE__', black_hole)
+    pac_content = pac_content.replace('__EASYLIST__', easylist_str)
+
+    try:
+        with open(path, 'w', encoding='utf-8') as pac:
+            pac.write(pac_content)
+    except BaseException as e:
+        print(e)
+
+
+def main(rule_url, proxy, pac_path, user_rule_path, ad_block, black_hole_opt):
+    print('\nDownloading rule from {}'.format(rule_url))
     url_rule_data = get_url_rule(rule_url)
     if url_rule_data:
         if user_rule_path:
-            print('getting user rule...')
+            print('\nReading user rule...')
             user_rule_data = get_user_rule(user_rule_path)
         else:
             user_rule_data = ''
-        print('generating pac...')
+        print('\nGenerating pac...')
         rule_data = '\n'.join([url_rule_data, user_rule_data])
         host_lst, cidr_result_lst = filter_rule(rule_data)
         host_json = json.dumps(host_lst)
         cidr_json = json.dumps(cidr_result_lst)
-        generate(proxy, host_json, cidr_json, pac_path)
+        if ad_block:
+            print('\n')
+            easylist = get_pac_str()
+            easylist_generate(proxy, host_json, cidr_json, easylist, black_hole_opt, pac_path)
+        else:
+            generate(proxy, host_json, cidr_json, pac_path)
 
 
 def run():
@@ -123,7 +154,8 @@ def run():
     output_opt = args.output
     proxy_rule_opt = args.proxy_rule
     user_rule_opt = args.user_rule
-    ad_rule_opt = args.ad_rule
+    ad_block_opt = args.ad_block
+    black_hole_opt = args.black_hole
     if not proxy_rule_opt:
         proxy_rule_opt = DEFAULT_PROXY_RULE
-    main(proxy_rule_opt, proxy_opt, output_opt, user_rule_opt)
+    main(proxy_rule_opt, proxy_opt, output_opt, user_rule_opt, ad_block_opt, black_hole_opt)
