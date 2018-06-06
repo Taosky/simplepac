@@ -1,42 +1,33 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-__author__ = 'stsmith'
+__origin_author__ = 'stsmith'
 
-# easylist_pac: Convert EasyList Tracker and Adblocking rules to an efficient Proxy Auto Configuration file
+# Code from https://github.com/essandess/easylist-pac-privoxy
+# Modified by Taosky
 
-# Copyright (C) 2017 by Steven T. Smith <steve dot t dot smith at gmail dot com>, GPL
 
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
-import copy
-import datetime
 import functools as fnt
+import urllib.request
+import datetime
+import shutil
+import time
+import copy
+import sys
 import os
 import re
-import sys
-import time
-import urllib.request
-import warnings
 
+import warnings
 import numpy as np
 
 try:
     machine_learning_flag = True
-    import multiprocessing as mp, scipy.sparse as sps
+    import multiprocessing as mp
+    import scipy.sparse as sps
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
 except ImportError as e:
+    mp = None
+    sps = None
+    LogisticRegression = None
+    StandardScaler = None
     machine_learning_flag = False
     print(e)
     warnings.warn("Install scikit-learn for more accurate EasyList rule selection.")
@@ -46,9 +37,6 @@ try:
     import matplotlib as mpl
     import matplotlib.pyplot as plt
 
-    # Legible plot style defaults
-    # http://matplotlib.org/api/matplotlib_configuration_api.html
-    # http://matplotlib.org/users/customizing.html
     mpl.rcParams['figure.figsize'] = (10.0, 5.0)
     mpl.rc('font', **{'family': 'sans-serif', 'weight': 'bold', 'size': 14})
     mpl.rc('axes', **{'titlesize': 20, 'titleweight': 'bold', 'labelsize': 16, 'labelweight': 'bold'})
@@ -58,19 +46,64 @@ try:
     mpl.rc('mathtext',
            **{'fontset': 'custom', 'rm': 'sans:bold', 'bf': 'sans:bold', 'it': 'sans:italic', 'sf': 'sans:bold',
               'default': 'it'})
-    # plt.rc('text',usetex=False) # [default] usetex should be False
     mpl.rcParams['text.latex.preamble'] = [r'\\usepackage{amsmath,sfmath} \\boldmath']
 except ImportError as e:
+    mpl = None
+    plt = None
     plot_flag = False
     print(e)
     warnings.warn("Install matplotlib to plot rule priorities.")
 
 
 class EasyListPAC:
-    '''Create a Proxy Auto Configuration file from EasyList rule sets.'''
+    """Create a Proxy Auto Configuration file from EasyList rule sets."""
 
     def __init__(self, easylist_url):
-        self.initArgs()
+        self.C = 1.e1
+        self.blackhole_ip_port = '127.0.0.1:12306'
+        self.easylist_dir = os.path.expanduser('./tmp')
+        self.debug = False
+        self.my_extra_rules_off = False
+        self.proxy_host_port = ''
+        self.orig_pac_file = os.path.join(self.easylist_dir, 'proxy.pac.orig')
+        self.good_rule_max = 1099
+        self.bad_rule_max = 19999
+        self.truncate_hash_max = 3999
+        self.truncate_alternatives_max = 499
+        self.sliding_window = False
+        self.exceptions_include_flag = False
+        self.wildcard_named_group_limit = 999
+        self.extra_easylist_urls = []
+        self.good_rules = []
+        self.bad_rules = []
+        self.good_opts = []
+        self.bad_opts = []
+        self.good_rules_include_flag = []
+        self.bad_rules_include_flag = []
+        self.download_list = []
+        self.file_list = []
+        self.good_fv_json = {}
+        self.good_column_hash = {}
+        self.bad_fv_json = {}
+        self.bad_column_hash = {}
+        self.good_fv_mat = None
+        self.good_row_hash = None
+        self.bad_fv_mat = None
+        self.bad_row_hash = None
+        self.good_y_all = None
+        self.bad_y_all = None
+        self.good_X_all = None
+        self.bad_X_all = None
+        self.easylist_strategy = ''
+        self.pac_proxy = ''
+        self.proxy_pac = ''
+        self.proxy_pac_postamble = ''
+        self.good_signal = []
+        self.bad_signal = []
+        self.good_columns = None
+        self.bad_columns = None
+        self.good_fv_logreg = None
+        self.bad_fv_logreg = None
         self.easylists_download_latest(easylist_url)
         self.parse_and_filter_rule_files()
         self.prioritize_rules()
@@ -84,30 +117,12 @@ class EasyListPAC:
                 '{: 5d}:\t{}\t\t[{:2.1f}]'.format(i, r, s) for (i, (r, s)) in
                 enumerate(zip(self.bad_rules, self.bad_signal))))
             if plot_flag:
-                # plt.plot(np.arange(len(self.good_signal)), self.good_signal, '.')
-                # plt.show()
                 plt.plot(np.arange(len(self.bad_signal)), self.bad_signal, '.')
                 plt.xlabel('Rule index')
                 plt.ylabel('Bad rule distance (logit)')
                 plt.show()
             return
         self.parse_easylist_rules()
-
-    def initArgs(self):
-        self.blackhole_ip_port = '127.0.0.1:12306'
-        self.easylist_dir = os.path.expanduser('~/Downloads')
-        self.debug = False
-        self.my_extra_rules_off = False
-        self.proxy_host_port = ''
-        self.orig_pac_file = os.path.join(self.easylist_dir, 'proxy.pac.orig')
-        self.good_rule_max = 1099
-        self.bad_rule_max = 19999
-        self.truncate_hash_max = 3999
-        self.truncate_alternatives_max = 499
-        self.sliding_window = False
-        self.exceptions_include_flag = False
-        self.wildcard_named_group_limit = 999
-        self.extra_easylist_urls = []
 
     def easylists_download_latest(self, easylist_url=''):
         if not easylist_url:
@@ -117,7 +132,6 @@ class EasyListPAC:
         fanboy_antifacebook = 'https://raw.githubusercontent.com/ryanbr/fanboy-adblock/master/fanboy-antifacebook.txt'
         self.download_list = [fanboy_antifacebook, fanboy_annoyance_url, easyprivacy_url,
                               easylist_url] + self.extra_easylist_urls
-        self.file_list = []
         for url in self.download_list:
             fname = os.path.basename(url)
             fname_full = os.path.join(self.easylist_dir, fname)
@@ -131,12 +145,7 @@ class EasyListPAC:
 
     def parse_and_filter_rule_files(self):
         """Parse all rules into good and bad lists. Use flags to specify included/excluded rules."""
-        self.good_rules = []
-        self.bad_rules = []
-        self.good_opts = []
-        self.bad_opts = []
-        self.good_rules_include_flag = []
-        self.bad_rules_include_flag = []
+
         for file in self.file_list:
             with open(file, 'r', encoding='utf-8') as fd:
                 self.easylist_append_rules(fd)
@@ -147,8 +156,9 @@ class EasyListPAC:
             line = line.rstrip()
             try:
                 self.easylist_append_one_rule(line)
-            except self.RuleIgnored as e:
-                if self.debug: print(e, flush=True)
+            except self.RuleIgnored as e_:
+                if self.debug:
+                    print(e_, flush=True)
                 continue
 
     class RuleIgnored(Exception):
@@ -158,10 +168,11 @@ class EasyListPAC:
         """Append EasyList rules from line to good and bad lists."""
         ignore_rules_flag = False
         ignored_rules_count = 0
-        line_orig = line
+        # line_orig = line
         # configuration lines and selector rules should already be filtered out
-        if re_test(configuration_re, line) or re_test(selector_re, line): raise self.RuleIgnored(
-            "Rule '{}' not added.".format(line))
+        if re_test(configuration_re, line) or re_test(selector_re, line):
+            raise self.RuleIgnored(
+                "Rule '{}' not added.".format(line))
         exception_flag = exception_filter(line)  # block default; pass if True
         line = exception_re.sub(r'\1', line)
         option_exception_re = not3dimppuposgh_option_exception_re  # ignore these options by default
@@ -193,9 +204,11 @@ class EasyListPAC:
             self.append_rule(exception_flag, line, opts, False)
             raise self.RuleIgnored("Rule '{}' not added.".format(line))
         # blank url case: ignore
-        if re_test(httpempty_re, line): raise self.RuleIgnored("Rule '{}' not added.".format(line))
+        if re_test(httpempty_re, line):
+            raise self.RuleIgnored("Rule '{}' not added.".format(line))
         # blank line case: ignore
-        if not bool(line): raise self.RuleIgnored("Rule '{}' not added.".format(line))
+        if not bool(line):
+            raise self.RuleIgnored("Rule '{}' not added.".format(line))
         # block default or pass exception
         if exception_flag:
             option_exception_re = not3dimppuposgh_option_exception_re  # ignore these options within exceptions
@@ -210,7 +223,8 @@ class EasyListPAC:
         self.append_rule(exception_flag, line, opts, True)
 
     def append_rule(self, exception_flag, rule, opts, include_rule_flag):
-        if not bool(rule): return  # last chance to reject blank lines -- shouldn't happen
+        if not bool(rule):
+            return  # last chance to reject blank lines -- shouldn't happen
         if exception_flag:
             self.good_rules.append(rule)
             self.good_opts.append(option_tokenizer(opts))
@@ -226,9 +240,9 @@ class EasyListPAC:
     def bad_class_test(self, rule, opts=''):
         """Bad rule of interest if a match for the bad regex's or specific rule options,
 e.g. non-domain specific popups or images."""
-        return bool(badregex_regex_filters_re.search(rule)) \
-               or (bool(opts) and bool(thrdp_im_pup_os_option_re.search(opts))
-                   and not bool(not3dimppupos_option_exception_re.search(opts)))
+        return bool(badregex_regex_filters_re.search(rule)) or (
+                bool(opts) and bool(thrdp_im_pup_os_option_re.search(opts))
+                and not bool(not3dimppupos_option_exception_re.search(opts)))
 
     def prioritize_rules(self):
         # use bootstrap regex preferences
@@ -244,9 +258,9 @@ e.g. non-domain specific popups or images."""
 
         # Logistic Regression for more accurate rule priorities
         if machine_learning_flag:
-            print("Performing logistic regression on rule sets. This will take a few minutes…", end='', flush=True)
+            # print("Performing logistic regression on rule sets. This will take a few minutes…", end='', flush=True)
             self.logreg_priorities()
-            print(" done.", flush=True)
+            # print(" done.", flush=True)
 
             # truncate to positive signal strengths
             if not self.debug:
@@ -256,12 +270,12 @@ e.g. non-domain specific popups or images."""
                     if isinstance(self.bad_rule_max, (int, np.int)) else np.count_nonzero(self.bad_signal > 0)
 
         # prioritize and limit the rules
-        good_pridx = np.array([e[0] for e in sorted(enumerate(self.good_signal), key=lambda e: e[1], reverse=True)],
+        good_pridx = np.array([e_[0] for e_ in sorted(enumerate(self.good_signal), key=lambda e_: e_[1], reverse=True)],
                               dtype=int)[:self.good_rule_max]
         self.good_columns = self.good_columns[good_pridx]
         self.good_signal = self.good_signal[good_pridx]
         self.good_rules = [self.good_rules[k] for k in self.good_columns]
-        bad_pridx = np.array([e[0] for e in sorted(enumerate(self.bad_signal), key=lambda e: e[1], reverse=True)],
+        bad_pridx = np.array([e_[0] for e_ in sorted(enumerate(self.bad_signal), key=lambda e_: e_[1], reverse=True)],
                              dtype=int)[:self.bad_rule_max]
         self.bad_columns = self.bad_columns[bad_pridx]
         self.bad_signal = self.bad_signal[bad_pridx]
@@ -269,9 +283,11 @@ e.g. non-domain specific popups or images."""
 
         # include hardcoded rules
         for rule in include_these_good_rules:
-            if rule not in self.good_rules: self.good_rules.append(rule)
+            if rule not in self.good_rules:
+                self.good_rules.append(rule)
         for rule in include_these_bad_rules:
-            if rule not in self.bad_rules: self.bad_rules.append(rule)
+            if rule not in self.bad_rules:
+                self.bad_rules.append(rule)
 
         # rules are now ordered
         self.good_columns = np.arange(0, len(self.good_rules), dtype=self.good_columns.dtype)
@@ -281,13 +297,11 @@ e.g. non-domain specific popups or images."""
 
     def logreg_priorities(self):
         """Rule prioritization using logistic regression on bootstrap preferences."""
-        self.good_fv_json = {}
-        self.good_column_hash = {}
+
         for col, (rule, opts) in enumerate(zip(self.good_rules, self.good_opts)):
             feature_vector_append_column(rule, opts, col, self.good_fv_json)
             self.good_column_hash[rule] = col
-        self.bad_fv_json = {}
-        self.bad_column_hash = {}
+
         for col, (rule, opts) in enumerate(zip(self.bad_rules, self.bad_opts)):
             feature_vector_append_column(rule, opts, col, self.bad_fv_json)
             self.bad_column_hash[rule] = col
@@ -305,17 +319,17 @@ e.g. non-domain specific popups or images."""
 
         self.logit_fit_method_sample_weights()
 
-        # inverse regularization signal; smaller values give more sparseness, less model rigidity
-        self.C = 1.e1
-
         self.logreg_test_in_training()
-        if self.sliding_window: self.logreg_sliding_window()
+        if self.sliding_window:
+            self.logreg_sliding_window()
 
         return
 
     def debug_feature_vector(self, rule_substring=r'google.com/pagead'):
+        j = 0
         for j, rule in enumerate(self.bad_rules):
-            if rule.find(rule_substring) >= 0: break
+            if rule.find(rule_substring) >= 0:
+                break
         col = j
         print(self.bad_rules[col])
         _, rows = self.bad_fv_mat[col, :].nonzero()  # fv_mat is transposed
@@ -367,11 +381,12 @@ e.g. non-domain specific popups or images."""
         # pre-prioritize using test-in-target values and limit the rules
         if not self.debug:
             good_preidx = np.array(
-                [e[0] for e in sorted(enumerate(self.good_signal), key=lambda e: e[1], reverse=True)], dtype=int)[
+                [e_[0] for e_ in sorted(enumerate(self.good_signal), key=lambda el: el[1], reverse=True)], dtype=int)[
                           :int(np.ceil(1.4 * self.good_rule_max))]
             self.good_columns = self.good_columns[good_preidx]
-            bad_preidx = np.array([e[0] for e in sorted(enumerate(self.bad_signal), key=lambda e: e[1], reverse=True)],
-                                  dtype=int)[:int(np.ceil(1.4 * self.bad_rule_max))]
+            bad_preidx = np.array(
+                [e_[0] for e_ in sorted(enumerate(self.bad_signal), key=lambda el: el[1], reverse=True)],
+                dtype=int)[:int(np.ceil(1.4 * self.bad_rule_max))]
             self.bad_columns = self.bad_columns[bad_preidx]
 
         # multithreaded loop for speed
@@ -390,14 +405,14 @@ e.g. non-domain specific popups or images."""
             bad_fv_logreg.n_jobs = 1  # achieve parallelism via block processing
 
             # distribute training and tests across multiprocessors
-            def training_op(queue, X_all, y_all, w_all, fv_logreg, columns, column_block):
+            def training_op(queue, X_all, y_all, w_all, fv_logreg_, columns, column_block_):
                 """Training and test operation put into a mp.Queue.
                 columns[column_block] and signal[column_block] are the rule columns and corresponding signal strengths
                 """
-                res = np.zeros(len(column_block))
-                for k in range(len(column_block)):
+                res_ = np.zeros(len(column_block_))
+                for k in range(len(column_block_)):
                     mask = np.zeros(len(y_all), dtype=bool)
-                    mask[columns[column_block[k]]] = True
+                    mask[columns[column_block_[k]]] = True
                     mask = np.logical_not(mask)
 
                     x_test = X_all[np.logical_not(mask)]
@@ -405,9 +420,9 @@ e.g. non-domain specific popups or images."""
                     y = y_all[mask]
                     w = w_all[mask]
 
-                    fv_logreg.fit(X, y, sample_weight=w)
-                    res[k] = fv_logreg.decision_function(x_test)[0]
-                queue.put((column_block, res))  # signal[column_block] = res
+                    fv_logreg_.fit(X, y, sample_weight=w)
+                    res_[k] = fv_logreg_.decision_function(x_test)[0]
+                queue.put((column_block_, res_))  # signal[column_block] = res
                 return
 
             num_threads = mp.cpu_count()
@@ -433,7 +448,8 @@ e.g. non-domain specific popups or images."""
                 column_block, res = q.get()
                 self.good_signal[column_block] = res
             # join all jobs and wait for them to complete
-            for p in jobs: p.join()
+            for p in jobs:
+                p.join()
 
             # bad
             q = mp.Queue()
@@ -455,12 +471,13 @@ e.g. non-domain specific popups or images."""
                 column_block, res = q.get()
                 self.bad_signal[column_block] = res
             # join all jobs and wait for them to complete
-            for p in jobs: p.join()
+            for p in jobs:
+                p.join()
         else:  # if use_blocked_not_sklearn_mp:
-            def training_op(X_all, y_all, w_all, fv_logreg, columns, signal):
+            def training_op(X_all, y_all, w_all, fv_logreg_, columns, signal):
                 """Training and test operations reusing results with multiprocessing."""
-                res = np.zeros(len(signal))
-                for k in range(len(res)):
+                res_ = np.zeros(len(signal))
+                for k in range(len(res_)):
                     mask = np.zeros(len(y_all), dtype=bool)
                     mask[columns[k]] = True
                     mask = np.logical_not(mask)
@@ -470,9 +487,9 @@ e.g. non-domain specific popups or images."""
                     y = y_all[mask]
                     w = w_all[mask]
 
-                    fv_logreg.fit(X, y, sample_weight=w)
-                    res[k] = fv_logreg.decision_function(x_test)[0]
-                signal[:] = res
+                    fv_logreg_.fit(X, y, sample_weight=w)
+                    res_[k] = fv_logreg_.decision_function(x_test)[0]
+                signal[:] = res_
                 return
 
             # good
@@ -484,14 +501,16 @@ e.g. non-domain specific popups or images."""
         return
 
     def parse_easylist_rules(self):
-        for rule in self.good_rules: self.easylist_to_javascript_vars(rule)
-        for rule in self.bad_rules: self.easylist_to_javascript_vars(rule)
+        for rule in self.good_rules:
+            self.easylist_to_javascript_vars(rule)
+        for rule in self.bad_rules:
+            self.easylist_to_javascript_vars(rule)
         ordered_unique_all_js_var_lists()
         return
 
     def easylist_to_javascript_vars(self, rule, ignore_huge_url_regex_rule_list=False):
         rule = rule.rstrip()
-        rule_orig = rule
+        # rule_orig = rule
         exception_flag = exception_filter(rule)  # block default; pass if True
         rule = exception_re.sub(r'\1', rule)
         option_exception_re = not3dimppuposgh_option_exception_re  # ignore these options by default
@@ -503,27 +522,34 @@ e.g. non-domain specific popups or images."""
             rule = option_re.sub(r'\1', rule)  # delete all the options and continue
         # ignore these cases
         # comment case: ignore
-        if re_test(comment_re, rule): return
+        if re_test(comment_re, rule):
+            return
         # block default or pass exception
         if exception_flag:
             option_exception_re = not3dimppuposgh_option_exception_re  # ignore these options within exceptions
-            if not self.exceptions_include_flag: return
+            if not self.exceptions_include_flag:
+                return
         # specific options: ignore
-        if re_test(option_exception_re, opts): return
+        if re_test(option_exception_re, opts):
+            return
         # blank url case: ignore
-        if re_test(httpempty_re, rule): return
+        if re_test(httpempty_re, rule):
+            return
         # blank line case: ignore
-        if not rule: return
+        if not rule:
+            return
         # treat each of the these cases separately, here and in Javascript
         # regex case
         if re_test(regex_re, rule):
-            if regex_ignore_test(rule): return
+            if regex_ignore_test(rule):
+                return
             rule = regex_re.sub(r'\1', rule)
             if exception_flag:
                 good_url_regex.append(rule)
             else:
                 if not re_test(badregex_regex_filters_re,
-                               rule): return  # limit bad regex's to those in the filter
+                               rule):
+                    return  # limit bad regex's to those in the filter
                 bad_url_regex.append(rule)
             return
         # now that regex's are handled, delete unnecessary wildcards, e.g. /.../*
@@ -547,12 +573,14 @@ e.g. non-domain specific popups or images."""
                         bad_da_host_exact.append(rule)
                     return
                 else:  # regex subsubcase
-                    if regex_ignore_test(rule): return
+                    if regex_ignore_test(rule):
+                        return
                     if exception_flag:
                         good_da_host_regex.append(rule)
                     else:
                         if not re_test(badregex_regex_filters_re,
-                                       rule): return  # limit bad regex's to those in the filter
+                                       rule):
+                            return  # limit bad regex's to those in the filter
                         bad_da_host_regex.append(rule)
                     return
             # hostpath subcase
@@ -568,21 +596,25 @@ e.g. non-domain specific popups or images."""
                         bad_da_hostpath_exact.append(rule)
                     return
                 else:  # regex subsubcase
-                    if regex_ignore_test(rule): return
+                    if regex_ignore_test(rule):
+                        return
                     # ignore option rules for some regex rules
-                    if re_test(alloption_exception_re, opts): return
+                    if re_test(alloption_exception_re, opts):
+                        return
                     if exception_flag:
                         good_da_hostpath_regex.append(rule)
                     else:
                         if not re_test(badregex_regex_filters_re,
-                                       rule): return  # limit bad regex's to those in the filter
+                                       rule):
+                            return  # limit bad regex's to those in the filter
                         bad_da_hostpath_regex.append(rule)
                     return
             # hostpathquery default case
             if True:
                 # if re_test(re.compile(r'^go\.'),rule):
                 #     pass
-                if regex_ignore_test(rule): return
+                if regex_ignore_test(rule):
+                    return
                 if exception_flag:
                     good_da_regex.append(rule)
                 else:
@@ -590,35 +622,31 @@ e.g. non-domain specific popups or images."""
                 return
         # all other non-regex patterns
         if True:
-            if regex_ignore_test(rule): return
+            if regex_ignore_test(rule):
+                return
             if not ignore_huge_url_regex_rule_list:
-                if re_test(alloption_exception_re, opts): return
+                if re_test(alloption_exception_re, opts):
+                    return
                 if exception_flag:
                     good_url_parts.append(rule)
                 else:
                     if not re_test(badregex_regex_filters_re,
-                                   rule): return  # limit bad regex's to those in the filter
+                                   rule):
+                        return  # limit bad regex's to those in the filter
                     bad_url_parts.append(rule)
                 return  # superfluous return
 
     def create_pac(self):
         self.proxy_pac_init()
-        self.proxy_pac = self.js_init_object('good_da_host_exact') \
-                         + self.js_init_regexp('good_da_host_regex', True) \
-                         + self.js_init_object('good_da_hostpath_exact') \
-                         + self.js_init_regexp('good_da_hostpath_regex', True) \
-                         + self.js_init_regexp('good_da_regex', True) \
-                         + self.js_init_object('good_da_host_exceptions_exact') \
-                         + self.js_init_object('bad_da_host_exact') \
-                         + self.js_init_regexp('bad_da_host_regex', True) \
-                         + self.js_init_object('bad_da_hostpath_exact') \
-                         + self.js_init_regexp('bad_da_hostpath_regex', True) \
-                         + self.js_init_regexp('bad_da_regex', True) \
-                         + self.js_init_regexp('good_url_parts') \
-                         + self.js_init_regexp('bad_url_parts') \
-                         + self.js_init_regexp('good_url_regex') \
-                         + self.js_init_regexp('bad_url_regex') \
-                         + self.proxy_pac_postamble
+        self.proxy_pac = self.js_init_object('good_da_host_exact') + self.js_init_regexp('good_da_host_regex',
+                                                                                         True) + self.js_init_object(
+            'good_da_hostpath_exact') + self.js_init_regexp('good_da_hostpath_regex', True) + self.js_init_regexp(
+            'good_da_regex', True) + self.js_init_object('good_da_host_exceptions_exact') + self.js_init_object(
+            'bad_da_host_exact') + self.js_init_regexp('bad_da_host_regex', True) + self.js_init_object(
+            'bad_da_hostpath_exact') + self.js_init_regexp('bad_da_hostpath_regex', True) + self.js_init_regexp(
+            'bad_da_regex', True) + self.js_init_regexp('good_url_parts') + self.js_init_regexp(
+            'bad_url_parts') + self.js_init_regexp('good_url_regex') + self.js_init_regexp(
+            'bad_url_regex') + self.proxy_pac_postamble
 
         return self.proxy_pac
 
@@ -989,11 +1017,11 @@ var {}_flag = {} > 0 ? true : false;  // test for non-zero number of rules
         arr_nostar = [x for x in globals()[array_name] if not re_test(wildcard_re, x)]
         arr_star = [x for x in globals()[array_name] if re_test(wildcard_re, x)]
 
-        def wildcard_preferences(rule):
-            track_test = not re_test(re.compile(r'track', re.IGNORECASE), rule)  # MSB
-            beacon_test = not re_test(re.compile(r'beacon]', re.IGNORECASE), rule)  # LSB
-            stats_test = not re_test(re.compile(r'stat[is]]', re.IGNORECASE), rule)  # LSB
-            analysis_test = not re_test(re.compile(r'anal[iy]]', re.IGNORECASE), rule)  # LSB
+        def wildcard_preferences(rule_):
+            track_test = not re_test(re.compile(r'track', re.IGNORECASE), rule_)  # MSB
+            beacon_test = not re_test(re.compile(r'beacon]', re.IGNORECASE), rule_)  # LSB
+            stats_test = not re_test(re.compile(r'stat[is]]', re.IGNORECASE), rule_)  # LSB
+            analysis_test = not re_test(re.compile(r'anal[iy]]', re.IGNORECASE), rule_)  # LSB
             return 8 * track_test + 4 * beacon_test + 2 * stats_test + analysis_test
 
         arr_star.sort(key=wildcard_preferences)
@@ -1003,19 +1031,19 @@ var {}_flag = {} > 0 ? true : false;  // test for non-zero number of rules
         rule_kdx = self.wildcard_named_group_limit
         for rule_kdx, rule in enumerate(arr_star):
             k_wildcard += len(arr_star[rule_kdx].split('*')) - 1
-            if k_wildcard > self.wildcard_named_group_limit: break
+            if k_wildcard > self.wildcard_named_group_limit:
+                break
         arr_star = arr_star[:rule_kdx]
         arr = arr_nostar + arr_star
 
         if re_test(r'(?:_parts|_regex)$', array_name) and bool(self.truncate_alternatives_max) and len(
                 arr) > self.truncate_alternatives_max:
-            # warnings.warn("Truncating regex alternatives rule set '{}' from {:d} to {:d}.".format(array_name, len(arr),
-            #                                                                                       self.truncate_alternatives_max))
             arr = arr[:self.truncate_alternatives_max]
 
         arr = [easylist_to_jsre(x) for x in arr]
         arr_regexp = "/" + domain_anchor_replace + "(?:" + "|".join(arr) + ")/i"
-        if len(arr) == 0: arr_regexp = match_nothing_regexp
+        if len(arr) == 0:
+            arr_regexp = match_nothing_regexp
 
         return '''\
     
@@ -1035,14 +1063,23 @@ def last_modified_resp(req):
     return lm
 
 
-last_modified_to_utc = lambda lm: time.mktime(datetime.datetime.strptime(lm, "%a, %d %b %Y %X GMT").timetuple())
-file_to_utc = lambda f: time.mktime(datetime.datetime.utcfromtimestamp(os.path.getmtime(f)).timetuple())
+# last_modified_to_utc = lambda lm: time.mktime(datetime.datetime.strptime(lm, "%a, %d %b %Y %X GMT").timetuple())
+
+def last_modified_to_utc(lm):
+    return time.mktime(datetime.datetime.strptime(lm, "%a, %d %b %Y %X GMT").timetuple())
+
+
+# file_to_utc = lambda f: time.mktime(datetime.datetime.utcfromtimestamp(os.path.getmtime(f)).timetuple())
+
+def file_to_utc(f):
+    return time.mktime(datetime.datetime.utcfromtimestamp(os.path.getmtime(f)).timetuple())
+
 
 user_agent = 'Mozilla/5.0 (Windows NT 10.0; WOW64; Trident/7.0; rv:11.0) like Gecko'
 
 # Monkey patch `re.sub` (***groan***)
 # See https://gist.github.com/gromgull/3922244
-if (sys.version_info < (3, 5)):
+if sys.version_info < (3, 5):
     def re_sub(pattern, replacement, string):
         def _r(m):
             # Now this is ugly.
@@ -1055,7 +1092,7 @@ if (sys.version_info < (3, 5)):
             # the match object is replaced with a wrapper that
             # returns "" instead of None for unmatched groups
 
-            class _m():
+            class _m:
                 def __init__(self, m):
                     self.m = m
                     self.string = m.string
@@ -1088,9 +1125,9 @@ not3dimppupos_option_exception_re = re.compile(
     r'~?\b(?:domain|script|stylesheet|object(?!-subrequest)|xmlhttprequest|subdocument|ping|websocket|webrtc|document|elemhide|generichide|genericblock|other|sitekey|match-case|collapse|donottrack|media|font)\b')
 not3dimppuposgh_option_exception_re = re.compile(
     r'~?\b(?:domain|script|stylesheet|object(?!-subrequest)|xmlhttprequest|subdocument|ping|websocket|webrtc|document|elemhide|genericblock|other|sitekey|match-case|collapse|donottrack|media|font)\b')
-thrdp_im_pup_os_option_re = re.compile(r'\b(?:third\-party|image|popup|object\-subrequest)\b')
-selector_re = re.compile(r'^(.*?)#\@?#*?.*?$')  # #@##div [should be #+?, but old style still used]
-regex_re = re.compile(r'^\@{0,2}\/(.*?)\/$')
+thrdp_im_pup_os_option_re = re.compile(r'\b(?:third-party|image|popup|object-subrequest)\b')
+selector_re = re.compile(r'^(.*?)#@?#*?.*?$')  # #@##div [should be #+?, but old style still used]
+regex_re = re.compile(r'^@{0,2}/(.*?)/$')
 wildcard_begend_re = re.compile(r'^(?:\**?([^*]*?)\*+?|\*+?([^*]*?)\**?)$')
 wild_anch_sep_exc_re = re.compile(r'[*|^@]')
 wild_sep_exc_noanch_re = re.compile(r'(?:[*^@]|\|[\s\S])')
@@ -1104,7 +1141,7 @@ pathend_re = re.compile(
 
 domain_anch_re = re.compile(r'^\|\|(.+?)$')
 # omit scheme from start of rule -- this will also be done in JS for efficiency
-scheme_anchor_re = re.compile(r'^(\|?(?:[\w*+-]{1,15})?://)');  # e.g. '|http://' at start
+scheme_anchor_re = re.compile(r'^(\|?(?:[\w*+-]{1,15})?://)')  # e.g. '|http://' at start
 
 # (Almost) fully-qualified domain name extraction (with EasyList wildcards)
 # Example case: banner.3ddownloads.com^
@@ -1161,7 +1198,7 @@ def rule_tokenizer(rule):
 
 
 easylist_name_opts_re = re.compile(
-    r'^~?\b(third\-party|domain|script|image|stylesheet|object(?!-subrequest)|object\-subrequest|xmlhttprequest|subdocument|ping|websocket|webrtc|document|elemhide|generichide|genericblock|other|sitekey|match-case|collapse|donottrack|popup|media|font)(?:=.+?)?$')
+    r'^~?\b(third-party|domain|script|image|stylesheet|object(?!-subrequest)|object-subrequest|xmlhttprequest|subdocument|ping|websocket|webrtc|document|elemhide|generichide|genericblock|other|sitekey|match-case|collapse|donottrack|popup|media|font)(?:=.+?)?$')
 
 
 def option_tokenizer(opts):
@@ -1192,8 +1229,10 @@ def re_test(regex, string):
 default_row = {"column": [], "count": []}
 
 
-def feature_vector_append_column(rule, opts, col, feature_vector={}):
+def feature_vector_append_column(rule, opts, col, feature_vector=None):
     # rule grams
+    if feature_vector is None:
+        feature_vector = {}
     toks = re.split(r'\s+', rule_tokenizer(rule))
     for k in range(len(toks)):
         # 1- and 2-grams
@@ -1208,11 +1247,15 @@ def feature_vector_append_column(rule, opts, col, feature_vector={}):
         # regex tokens used to relate for short, unique rules
         grams = []
         for regex in high_weight_regex:
-            if bool(regex.search(rule)): grams.append('regex: ' + regex.pattern)
-        if bool(grams): feature_vector_append_grams(grams, col, feature_vector, weight=1 / np.sqrt(len(grams)))
+            if bool(regex.search(rule)):
+                grams.append('regex: ' + regex.pattern)
+        if bool(grams):
+            feature_vector_append_grams(grams, col, feature_vector, weight=1 / np.sqrt(len(grams)))
 
 
-def feature_vector_append_grams(grams, col, feature_vector={}, weight=1.):
+def feature_vector_append_grams(grams, col, feature_vector=None, weight=1.):
+    if feature_vector is None:
+        feature_vector = {}
     for ky in grams:
         feature_vector[ky] = feature_vector.get(ky, copy.deepcopy(default_row))
         if not feature_vector[ky]["column"] or feature_vector[ky]["column"][-1] is not col:
@@ -1222,8 +1265,10 @@ def feature_vector_append_grams(grams, col, feature_vector={}, weight=1.):
 
 
 # store feature vectors as sparse arrays
-def fv_to_mat(feature_vector=copy.deepcopy(default_row), rules=[]):
+def fv_to_mat(feature_vector=copy.deepcopy(default_row), rules=None):
     """Compute sparse, transposed, CSR matrix and row hash from a feature vector."""
+    if rules is None:
+        rules = []
     row_hash = {}
     rows = []
     cols = []
@@ -1257,7 +1302,7 @@ def easylist_to_jsre(pat):
         return res
 
     def tr(pat_):
-        return re.sub(r'[-\/.?:!+^|$()[\]{}]', re_easylist, pat_)
+        return re.sub(r'[-/.?:!+^|$()[\]{}]', re_easylist, pat_)
 
     def re_wildcard(match):
         global n_wildcard
@@ -1316,8 +1361,12 @@ def ordered_unique_all_js_var_lists():
 
 
 # ordered uniqueness, https://stackoverflow.com/questions/12897374/get-unique-values-from-a-list-in-python
-ordered_unique_nonempty = lambda listable: fnt.reduce(lambda l, x: l.append(x) or l if x not in l and bool(x) else l,
-                                                      listable, [])
+# ordered_unique_nonempty = lambda listable: fnt.reduce(lambda l, x: l.append(x) or l if x not in l and bool(x) else l,
+#                                                       listable, [])
+def ordered_unique_nonempty(listable):
+    return fnt.reduce(lambda l, x: l.append(x) or l if x not in l and bool(x) else l,
+                      listable, [])
+
 
 # list variables based on EasyList strategies above
 # initial values prepended before EasyList rules
@@ -1998,5 +2047,12 @@ badregex_regex_filters_re = re.compile(r'(?:{})'.format('|'.join(badregex_regex_
 
 
 def get_pac_str(url=''):
-    easy = EasyListPAC(url)
-    return easy.create_pac()
+    try:
+        os.mkdir('./tmp')
+        easy = EasyListPAC(url)
+        pac_content = easy.create_pac()
+        shutil.rmtree('./tmp')
+    except BaseException as e:
+        print(e)
+        return None
+    return pac_content

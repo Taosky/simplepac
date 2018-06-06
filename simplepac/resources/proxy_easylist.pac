@@ -3,8 +3,6 @@
  * https://github.com/Taosky/simplepac
  */
 
-var normal = "DIRECT";
-
 var proxy = '__PROXY__; DIRECT;';
 
 // on iOS a working blackhole requires return code 200;
