@@ -1,5 +1,5 @@
 # simplepac
-Generate a simple pac for proxy and ad-block(use the code from [easylist-pac-privoxy](https://github.com/essandess/)).
+Generate a simple pac for proxy and ad-block(use the code from [easylist-pac-privoxy](https://github.com/essandess/easylist-pac-privoxy)).
 
 
     usage: simplepac [-h] -p PROXY -o OUTPUT [--proxy-rule PROXY_RULE]
