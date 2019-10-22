@@ -21,7 +21,7 @@ setuptools.setup(
         'console_scripts': ['simplepac=simplepac.core:run'],
     },
     install_requires=[
-        'requests==2.18.4',
+        'requests==2.20.0',
         'matplotlib==2.2.2',
         'numpy==1.14.3',
         'sklearn',
